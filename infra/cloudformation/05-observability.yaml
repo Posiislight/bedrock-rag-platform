@@ -1,0 +1,182 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Observability - CloudWatch dashboard and alarms for LLM latency, tokens, errors, cost, and queue health.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: llm-platform
+  AlarmEmail:
+    Type: String
+    Default: ""
+    Description: Optional email address subscribed to alarm notifications.
+  LatencyP95ThresholdMs:
+    Type: Number
+    Default: 15000
+  HourlyCostThresholdUsd:
+    Type: Number
+    Default: 5
+
+Conditions:
+  HasEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
+
+Resources:
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-alarms"
+
+  AlarmSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+
+  ErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-llm-errors"
+      AlarmDescription: LLM calls failing (5+ errors in 5 minutes)
+      Namespace: LLMPlatform
+      MetricName: Errors
+      Dimensions:
+        - Name: Operation
+          Value: chat
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  LatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-llm-latency-p95"
+      AlarmDescription: p95 chat latency above threshold for 3 of 3 periods
+      Namespace: LLMPlatform
+      MetricName: LatencyMs
+      Dimensions:
+        - Name: Operation
+          Value: chat
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !Ref LatencyP95ThresholdMs
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  CostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-llm-hourly-cost"
+      AlarmDescription: Estimated LLM spend per hour above threshold
+      Namespace: LLMPlatform
+      MetricName: CostUSD
+      Dimensions:
+        - Name: Operation
+          Value: chat
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: !Ref HourlyCostThresholdUsd
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  DeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-dlq-not-empty"
+      AlarmDescription: Messages landed in the dead-letter queue (repeated inference failures)
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !ImportValue
+            Fn::Sub: "${ProjectName}-DeadLetterQueueName"
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  QueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-queue-backlog-age"
+      AlarmDescription: Oldest queued request waiting more than 5 minutes
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !ImportValue
+            Fn::Sub: "${ProjectName}-InferenceQueueName"
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 300
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ProjectName}-llm"
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              {"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{
+                "title":"Latency (ms) - chat","region":"${AWS::Region}","view":"timeSeries","stat":"Average","period":60,
+                "metrics":[
+                  ["LLMPlatform","LatencyMs","Operation","chat",{"label":"avg"}],
+                  ["...",{"stat":"p95","label":"p95"}],
+                  ["...",{"stat":"p99","label":"p99"}]
+                ]}},
+              {"type":"metric","x":12,"y":0,"width":12,"height":6,"properties":{
+                "title":"Requests and errors","region":"${AWS::Region}","view":"timeSeries","stat":"Sum","period":60,
+                "metrics":[
+                  ["LLMPlatform","Requests","Operation","chat"],
+                  ["LLMPlatform","Errors","Operation","chat",{"color":"#d62728"}]
+                ]}},
+              {"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{
+                "title":"Token counts","region":"${AWS::Region}","view":"timeSeries","stat":"Sum","period":60,
+                "metrics":[
+                  ["LLMPlatform","InputTokens","Operation","chat"],
+                  ["LLMPlatform","OutputTokens","Operation","chat"],
+                  ["LLMPlatform","InputTokens","Operation","embed"]
+                ]}},
+              {"type":"metric","x":12,"y":6,"width":12,"height":6,"properties":{
+                "title":"Cost (USD) - total and per request","region":"${AWS::Region}","view":"timeSeries","period":300,
+                "metrics":[
+                  ["LLMPlatform","CostUSD","Operation","chat",{"stat":"Sum","label":"total"}],
+                  ["...",{"stat":"Average","label":"per request","yAxis":"right"}]
+                ]}},
+              {"type":"metric","x":0,"y":12,"width":12,"height":6,"properties":{
+                "title":"Async queue depth","region":"${AWS::Region}","view":"timeSeries","stat":"Maximum","period":60,
+                "metrics":[
+                  ["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${QueueName}",{"label":"inference queue"}],
+                  ["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${DlqName}",{"label":"dead-letter queue","color":"#d62728"}]
+                ]}},
+              {"type":"alarm","x":12,"y":12,"width":12,"height":6,"properties":{
+                "title":"Alarms",
+                "alarms":["${ErrorsAlarm.Arn}","${LatencyAlarm.Arn}","${CostAlarm.Arn}","${DeadLetterAlarm.Arn}","${QueueAgeAlarm.Arn}"]}}
+            ]
+          }
+        - QueueName: !ImportValue
+            Fn::Sub: "${ProjectName}-InferenceQueueName"
+          DlqName: !ImportValue
+            Fn::Sub: "${ProjectName}-DeadLetterQueueName"
+
+Outputs:
+  DashboardName:
+    Value: !Sub "${ProjectName}-llm"
+  AlarmTopicArn:
+    Value: !Ref AlarmTopic

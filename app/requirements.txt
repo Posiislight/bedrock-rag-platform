@@ -1,0 +1,6 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.7,<3
+boto3>=1.35
+numpy>=1.26
+pypdf>=4.2

@@ -1,0 +1,214 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Compute - EC2 instance running the FastAPI service and SQS worker, with a least-privilege IAM role (no hard-coded keys).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: llm-platform
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet (needs internet access for dnf/pip, or VPC endpoints).
+  AllowedCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to reach the API on port 8000. Restrict this.
+  InstanceType:
+    Type: String
+    Default: t3.small
+  ModelId:
+    Type: String
+    Default: anthropic.claude-3-haiku-20240307-v1:0
+    Description: The ONE chat model the instance role may invoke.
+  EmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
+    Description: Embedding model used by the RAG pipeline (also invoke-scoped).
+  AppArtifactKey:
+    Type: String
+    Default: artifacts/app.tar.gz
+    Description: S3 key (in the data bucket) of the packaged app.
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-instance-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore # Session Manager instead of SSH
+      Policies:
+        - PolicyName: bedrock-invoke-scoped
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${ModelId}"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${EmbeddingModelId}"
+        - PolicyName: data-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub
+                  - "${Bucket}/*"
+                  - Bucket: !ImportValue
+                      Fn::Sub: "${ProjectName}-DataBucketArn"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !ImportValue
+                  Fn::Sub: "${ProjectName}-DataBucketArn"
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !ImportValue
+                  Fn::Sub: "${ProjectName}-JobsTableArn"
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:ChangeMessageVisibility
+                  - sqs:GetQueueAttributes
+                Resource: !ImportValue
+                  Fn::Sub: "${ProjectName}-InferenceQueueArn"
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !ImportValue
+                  Fn::Sub: "${ProjectName}-ApiKeySecretArn"
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "cloudwatch:namespace": LLMPlatform
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: LLM API access
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: !Ref AllowedCidr
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      MetadataOptions:
+        HttpTokens: required # IMDSv2 only
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-api"
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -euxo pipefail
+            dnf install -y python3.11 python3.11-pip
+            mkdir -p /opt/llm-platform
+            aws s3 cp "s3://${Bucket}/${AppArtifactKey}" /tmp/app.tar.gz
+            tar -xzf /tmp/app.tar.gz -C /opt/llm-platform
+            python3.11 -m venv /opt/llm-platform/venv
+            /opt/llm-platform/venv/bin/pip install -r /opt/llm-platform/requirements.txt
+
+            cat > /etc/llm-platform.env <<'EOF_ENV'
+            AWS_REGION=${AWS::Region}
+            BEDROCK_MODEL_ID=${ModelId}
+            EMBEDDING_MODEL_ID=${EmbeddingModelId}
+            DATA_BUCKET=${Bucket}
+            JOBS_TABLE=${Table}
+            QUEUE_URL=${QueueUrl}
+            QUEUE_MAX_RECEIVES=${MaxReceives}
+            API_KEY_SECRET_ID=${SecretArn}
+            EOF_ENV
+
+            cat > /etc/systemd/system/llm-api.service <<'EOF_UNIT'
+            [Unit]
+            Description=LLM FastAPI service
+            After=network-online.target
+            [Service]
+            WorkingDirectory=/opt/llm-platform
+            EnvironmentFile=/etc/llm-platform.env
+            ExecStart=/opt/llm-platform/venv/bin/uvicorn llm_platform.api.main:app --host 0.0.0.0 --port 8000
+            Restart=always
+            [Install]
+            WantedBy=multi-user.target
+            EOF_UNIT
+
+            cat > /etc/systemd/system/llm-worker.service <<'EOF_UNIT'
+            [Unit]
+            Description=LLM SQS worker
+            After=network-online.target
+            [Service]
+            WorkingDirectory=/opt/llm-platform
+            EnvironmentFile=/etc/llm-platform.env
+            ExecStart=/opt/llm-platform/venv/bin/python -m llm_platform.jobs.worker
+            Restart=always
+            [Install]
+            WantedBy=multi-user.target
+            EOF_UNIT
+
+            systemctl daemon-reload
+            systemctl enable --now llm-api llm-worker
+          - Bucket: !ImportValue
+              Fn::Sub: "${ProjectName}-DataBucketName"
+            Table: !ImportValue
+              Fn::Sub: "${ProjectName}-JobsTableName"
+            QueueUrl: !ImportValue
+              Fn::Sub: "${ProjectName}-InferenceQueueUrl"
+            MaxReceives: !ImportValue
+              Fn::Sub: "${ProjectName}-MaxReceiveCount"
+            SecretArn: !ImportValue
+              Fn::Sub: "${ProjectName}-ApiKeySecretArn"
+
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+    Export:
+      Name: !Sub "${ProjectName}-InstanceId"
+  PublicIp:
+    Value: !GetAtt Instance.PublicIp
+  ApiUrl:
+    Value: !Sub "http://${Instance.PublicIp}:8000"
+  InstanceRoleArn:
+    Value: !GetAtt InstanceRole.Arn

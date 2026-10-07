@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Async inference - SQS queue with retries and a dead-letter queue.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: llm-platform
+  MaxReceiveCount:
+    Type: Number
+    Default: 3
+    Description: Delivery attempts before a message moves to the dead-letter queue.
+  VisibilityTimeoutSeconds:
+    Type: Number
+    Default: 180
+    Description: Retry delay for a failed message; must exceed the longest expected inference.
+
+Resources:
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-inference-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      SqsManagedSseEnabled: true
+
+  InferenceQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-inference"
+      VisibilityTimeout: !Ref VisibilityTimeoutSeconds
+      ReceiveMessageWaitTimeSeconds: 20
+      MessageRetentionPeriod: 345600 # 4 days
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: !Ref MaxReceiveCount
+
+Outputs:
+  InferenceQueueUrl:
+    Value: !Ref InferenceQueue
+    Export:
+      Name: !Sub "${ProjectName}-InferenceQueueUrl"
+  InferenceQueueArn:
+    Value: !GetAtt InferenceQueue.Arn
+    Export:
+      Name: !Sub "${ProjectName}-InferenceQueueArn"
+  InferenceQueueName:
+    Value: !GetAtt InferenceQueue.QueueName
+    Export:
+      Name: !Sub "${ProjectName}-InferenceQueueName"
+  DeadLetterQueueArn:
+    Value: !GetAtt DeadLetterQueue.Arn
+    Export:
+      Name: !Sub "${ProjectName}-DeadLetterQueueArn"
+  DeadLetterQueueName:
+    Value: !GetAtt DeadLetterQueue.QueueName
+    Export:
+      Name: !Sub "${ProjectName}-DeadLetterQueueName"
+  MaxReceiveCount:
+    Value: !Ref MaxReceiveCount
+    Export:
+      Name: !Sub "${ProjectName}-MaxReceiveCount"
