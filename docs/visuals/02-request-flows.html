@@ -1,0 +1,62 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Request flows</title>
+<link rel="stylesheet" href="base.css">
+<style>
+ .cols { display:grid; grid-template-columns: 1fr 1fr; gap:28px; margin-top:32px; }
+ .card { background:var(--surface); border:1px solid var(--line); border-radius:18px; padding:28px 30px; }
+ h2 { font-family:"Instrument Serif",Georgia,serif; font-weight:400; font-size:32px; margin-bottom:6px; }
+ .cap { color:var(--fg-muted); font-size:15px; margin-bottom:22px; }
+ ol { list-style:none; padding:0; counter-reset:s; }
+ li { counter-increment:s; display:grid; grid-template-columns:34px 1fr; gap:14px; padding:11px 0; border-top:1px solid var(--line); font-size:16px; line-height:1.4; }
+ li:first-child { border-top:0; }
+ li::before { content:counter(s); width:28px; height:28px; border-radius:50%; background:var(--brand-soft); color:var(--brand); display:grid; place-items:center; font:500 14px "Geist Mono",monospace; }
+ li b { font-weight:600; } li span { color:var(--fg-muted); display:block; font-size:14px; margin-top:2px; }
+ code { font-family:"Geist Mono",Consolas,monospace; font-size:13.5px; color:var(--brand); }
+ svg { width:100%; height:auto; }
+ .st { fill:var(--showcase); stroke:var(--stroke); stroke-width:1.5; }
+ .ok { stroke:var(--ok); } .bad { stroke:var(--bad); } .wr { stroke:var(--warn); }
+ .tx { fill:var(--fg); font:600 16px Geist,sans-serif; text-anchor:middle; }
+ .tm { fill:var(--fg-muted); font:400 12.5px "Geist Mono",Consolas,monospace; }
+ .ar { stroke:var(--fg-muted); stroke-width:1.8; fill:none; marker-end:url(#q); }
+</style></head><body>
+<div class="tag">Request flows</div>
+<h1>Two paths: <em>answer now</em>, or answer later</h1>
+<p class="sub">Synchronous RAG returns cited answers in one call. The async path returns a job id immediately and lets SQS handle retries and dead-lettering.</p>
+
+<div class="cols">
+ <div class="card">
+  <h2>RAG query, synchronous</h2>
+  <div class="cap"><code>POST /v1/rag/query</code></div>
+  <ol>
+   <li><div><b>Authenticate</b><span><code>X-API-Key</code> checked against the Secrets Manager value</span></div></li>
+   <li><div><b>Embed the question</b><span>Titan Text Embeddings v2 via Bedrock</span></div></li>
+   <li><div><b>Search the index</b><span>load <code>vectors.npy</code> + <code>chunks.json</code> from S3, cosine top-k (default 4)</span></div></li>
+   <li><div><b>Build a numbered prompt</b><span>system prompt: answer only from passages, cite <code>[n]</code>, say "don't know" otherwise</span></div></li>
+   <li><div><b>Converse call</b><span>chat model returns text plus token usage</span></div></li>
+   <li><div><b>Resolve citations</b><span>only <code>[n]</code> that map to real passages are kept, with source, chunk, score, snippet</span></div></li>
+   <li><div><b>Emit metrics</b><span>latency, tokens, <code>CostUSD</code> to CloudWatch (batched)</span></div></li>
+  </ol>
+ </div>
+
+ <div class="card">
+  <h2>Async job lifecycle</h2>
+  <div class="cap"><code>POST /v1/jobs</code> returns <code>202 {job_id, status: "queued"}</code></div>
+  <svg viewBox="0 0 640 430" xmlns="http://www.w3.org/2000/svg">
+   <defs><marker id="q" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#a29e95"/></marker></defs>
+   <rect class="st" x="10" y="30" width="130" height="56" rx="12"/><text class="tx" x="75" y="64">queued</text>
+   <rect class="st wr" x="255" y="30" width="130" height="56" rx="12"/><text class="tx" x="320" y="64">running</text>
+   <rect class="st ok" x="500" y="30" width="130" height="56" rx="12"/><text class="tx" x="565" y="64">succeeded</text>
+   <rect class="st wr" x="255" y="170" width="130" height="56" rx="12"/><text class="tx" x="320" y="204">retrying</text>
+   <rect class="st bad" x="500" y="170" width="130" height="56" rx="12"/><text class="tx" x="565" y="204">failed</text>
+   <rect class="st bad" x="500" y="310" width="130" height="56" rx="12"/><text class="tx" x="565" y="337">dead-letter</text><text class="tm" x="565" y="355" text-anchor="middle">queue</text>
+   <path class="ar" d="M140 58 L255 58"/><text class="tm" x="170" y="48">receives</text>
+   <path class="ar" d="M385 58 L500 58"/><text class="tm" x="398" y="48">msg deleted</text>
+   <path class="ar" d="M320 86 L320 170"/><text class="tm" x="332" y="132">exception,</text><text class="tm" x="332" y="148">attempt &lt; 3</text>
+   <path class="ar" d="M255 190 C 200 190, 200 110, 255 76"/><text class="tm" x="196" y="150" text-anchor="end">visibility timeout,</text><text class="tm" x="196" y="166" text-anchor="end">SQS redelivers</text>
+   <path class="ar" d="M385 198 L500 198"/><text class="tm" x="397" y="188">3rd receive</text>
+   <path class="ar" d="M565 226 L565 310"/><text class="tm" x="552" y="274" text-anchor="end">maxReceiveCount</text>
+  </svg>
+  <div class="cap" style="margin:16px 0 0">Failure never deletes the message, so retry logic lives in SQS rather than in custom code. A DLQ alarm fires on the first dead-lettered job.</div>
+ </div>
+</div>
+<div class="foot"><span>Source: app/llm_platform/rag/answer.py, jobs/worker.py, jobs/store.py</span><span class="mono">github.com/Posiislight/bedrock-rag-platform</span></div>
+</body></html>

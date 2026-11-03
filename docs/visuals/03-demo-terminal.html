@@ -1,0 +1,48 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Demo session</title>
+<link rel="stylesheet" href="base.css">
+<style>
+ .term { margin-top:30px; background:#0d0d0c; border:1px solid var(--stroke); border-radius:16px; overflow:hidden; box-shadow:0 20px 50px -25px #000; }
+ .bar { display:flex; align-items:center; gap:8px; padding:12px 16px; background:var(--showcase); border-bottom:1px solid var(--line); color:var(--fg-muted); font-size:13px; }
+ .bar i { width:12px; height:12px; border-radius:50%; background:var(--stroke); display:inline-block; }
+ .bar span { margin-left:10px; font-family:"Geist Mono",Consolas,monospace; }
+ pre { margin:0; padding:24px 28px 28px; font:400 15.5px/1.55 "Geist Mono",Consolas,monospace; color:#d8d4cb; white-space:pre-wrap; }
+ .c { color:var(--fg-muted); } .p { color:var(--brand); } .k { color:var(--ok); } .w { color:var(--warn); } .n { color:#8fb0d9; }
+ .note { margin-top:18px; display:flex; gap:12px; align-items:flex-start; background:var(--brand-soft); border:1px solid #3a2830; color:var(--fg); border-radius:12px; padding:14px 18px; font-size:15px; line-height:1.45; }
+ .note b { color:var(--brand); font-weight:600; white-space:nowrap; }
+</style></head><body>
+<div class="tag">Sample session</div>
+<h1>Ingest, ask, and <em>watch a job</em> finish</h1>
+<p class="sub">The four calls from the README, end to end. Response fields are exactly what the API returns; token counts, latencies, costs and the job id are sample values.</p>
+
+<div class="term">
+ <div class="bar"><i></i><i></i><i></i><span>bash · bedrock-rag-platform</span></div>
+<pre><span class="c"># 1. load ./sample-docs into S3, then build the vector index</span>
+<span class="p">$</span> scripts/ingest-docs.sh ./sample-docs
+<span class="n">{"documents": 1, "chunks": 1}</span>
+
+<span class="c"># 2. RAG query with citations</span>
+<span class="p">$</span> curl -s $API_URL/v1/rag/query -H "X-API-Key: $KEY" -H 'content-type: application/json' \
+    -d '{"question":"How should apps authenticate to Bedrock?"}'
+{
+  <span class="k">"answer"</span>: "Apps should call Bedrock through an IAM role attached to the compute resource,
+             scoped to bedrock:InvokeModel on the specific model ARN, and never embed access keys [1].",
+  <span class="k">"citations"</span>: [{ "ref": 1, "source": "docs/aws-bedrock-notes.md", "chunk_index": 0,
+                  "score": 0.7412, "snippet": "# Amazon Bedrock notes ..." }],
+  <span class="k">"usage"</span>: { "input_tokens": 318, "output_tokens": 52, "latency_ms": 1240, "cost_usd": 0.000144 }
+}
+
+<span class="c"># 3. submit the same kind of question as an async job</span>
+<span class="p">$</span> curl -s $API_URL/v1/jobs -H "X-API-Key: $KEY" -H 'content-type: application/json' \
+    -d '{"type":"rag","rag":{"question":"What happens after maxReceiveCount?"}}'
+<span class="n">{"job_id": "0b6c1f4e-…", "status": "queued"}</span>
+
+<span class="c"># 4. poll the job</span>
+<span class="p">$</span> curl -s $API_URL/v1/jobs/0b6c1f4e-… -H "X-API-Key: $KEY"
+{ "job_id": "0b6c1f4e-…", "type": "rag", <span class="w">"status": "running"</span>,   "attempts": 1 }
+{ "job_id": "0b6c1f4e-…", "type": "rag", <span class="k">"status": "succeeded"</span>, "attempts": 1,
+  "result": { "answer": "After maxReceiveCount deliveries the message moves to the dead-letter queue
+              for inspection [1].", ... } }</pre>
+</div>
+<div class="note"><b>Illustrative output.</b><span>The project has been unit-tested and its templates pass cfn-lint, but it has not been deployed to a live AWS account, so these responses are written to match the code, not captured from a run. Replace this image with a real capture after deploying.</span></div>
+<div class="foot"><span>Shapes from: api/main.py, rag/answer.py, jobs/store.py · sample-docs/aws-bedrock-notes.md</span><span class="mono">github.com/Posiislight/bedrock-rag-platform</span></div>
+</body></html>

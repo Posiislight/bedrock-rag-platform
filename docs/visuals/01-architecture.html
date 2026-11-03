@@ -1,0 +1,112 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Architecture</title>
+<link rel="stylesheet" href="base.css">
+<style>
+ svg { display:block; margin-top:28px; width:1472px; height:640px; }
+ .box { fill: var(--surface); stroke: var(--stroke); stroke-width: 1.5; }
+ .box.hot { stroke: var(--brand); fill: var(--brand-soft); }
+ .zone { fill: none; stroke: var(--stroke); stroke-width: 1.5; stroke-dasharray: 6 6; }
+ .t { fill: var(--fg); font: 600 17px Geist, sans-serif; }
+ .s { fill: var(--fg-muted); font: 400 13.5px Geist, sans-serif; }
+ .m { fill: var(--fg-muted); font: 400 12.5px "Geist Mono", Consolas, monospace; }
+ .z { fill: var(--fg-muted); font: 500 12px Geist, sans-serif; letter-spacing: .1em; }
+ .ln { stroke: var(--fg-muted); stroke-width: 1.8; fill: none; marker-end: url(#a); }
+ .ln.b { stroke: var(--brand); marker-end: url(#ab); }
+ .ln.d { stroke-dasharray: 5 5; }
+ .lbl { fill: var(--brand); font: 500 12.5px "Geist Mono", Consolas, monospace; }
+ .lblm { fill: var(--fg-muted); font: 400 12.5px "Geist Mono", Consolas, monospace; }
+</style></head><body>
+<div class="tag">Bedrock LLM + RAG platform</div>
+<h1>How a request moves through <em>the system</em></h1>
+<p class="sub">A FastAPI service on EC2 calls Amazon Bedrock for chat and embeddings, retrieves from S3-backed documents, runs slow work through SQS, and reports every call to CloudWatch. All five stacks are CloudFormation.</p>
+
+<svg viewBox="0 0 1472 640" xmlns="http://www.w3.org/2000/svg">
+ <defs>
+  <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#a29e95"/></marker>
+  <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#d2909f"/></marker>
+ </defs>
+
+ <rect class="zone" x="250" y="20" width="620" height="600" rx="18"/>
+ <text class="z" x="272" y="46">EC2 INSTANCE  ·  IMDSv2, NO SSH (SSM ONLY)</text>
+
+ <!-- client -->
+ <rect class="box" x="0" y="250" width="170" height="90" rx="14"/>
+ <text class="t" x="24" y="288">Client</text><text class="s" x="24" y="311">curl / app</text>
+
+ <!-- api -->
+ <rect class="box hot" x="290" y="130" width="250" height="150" rx="14"/>
+ <text class="t" x="312" y="164">FastAPI</text>
+ <text class="s" x="312" y="188">X-API-Key auth</text>
+ <text class="m" x="312" y="218">POST /v1/chat</text>
+ <text class="m" x="312" y="238">POST /v1/rag/query</text>
+ <text class="m" x="312" y="258">POST /v1/jobs</text>
+
+ <!-- worker -->
+ <rect class="box" x="290" y="400" width="250" height="110" rx="14"/>
+ <text class="t" x="312" y="434">SQS worker</text>
+ <text class="s" x="312" y="458">long-poll, 5 msgs / receive</text>
+ <text class="s" x="312" y="480">same Bedrock + RAG code</text>
+
+ <!-- rag -->
+ <rect class="box" x="590" y="130" width="250" height="150" rx="14"/>
+ <text class="t" x="612" y="164">RAG engine</text>
+ <text class="s" x="612" y="188">chunk 1000 / overlap 200</text>
+ <text class="s" x="612" y="210">cosine top-k search</text>
+ <text class="s" x="612" y="232">numpy matrix in memory</text>
+ <text class="s" x="612" y="254">answers cite [n] passages</text>
+
+ <!-- secrets -->
+ <rect class="box" x="0" y="60" width="170" height="90" rx="14"/>
+ <text class="t" x="24" y="98">Secrets Manager</text><text class="s" x="24" y="121">generated API key</text>
+
+ <!-- bedrock -->
+ <rect class="box hot" x="1010" y="40" width="270" height="130" rx="14"/>
+ <text class="t" x="1032" y="74">Amazon Bedrock</text>
+ <text class="s" x="1032" y="98">Converse: chat model</text>
+ <text class="s" x="1032" y="120">Titan Text Embeddings v2</text>
+ <text class="m" x="1032" y="148">IAM: InvokeModel on 2 ARNs</text>
+
+ <!-- s3 -->
+ <rect class="box" x="1010" y="215" width="270" height="110" rx="14"/>
+ <text class="t" x="1032" y="249">S3</text>
+ <text class="m" x="1032" y="275">docs/   source files</text>
+ <text class="m" x="1032" y="297">index/  vectors.npy + chunks.json</text>
+
+ <!-- sqs -->
+ <rect class="box" x="1010" y="370" width="270" height="76" rx="14"/>
+ <text class="t" x="1032" y="403">SQS inference queue</text>
+ <text class="s" x="1032" y="426">visibility timeout, redelivery</text>
+ <rect class="box" x="1010" y="478" width="270" height="62" rx="14" style="stroke:var(--bad)"/>
+ <text class="t" x="1032" y="506">Dead-letter queue</text>
+ <text class="s" x="1032" y="526">after 3 failed receives</text>
+
+ <!-- ddb -->
+ <rect class="box" x="1010" y="568" width="270" height="52" rx="14"/>
+ <text class="t" x="1032" y="600">DynamoDB job state  <tspan class="s">· 7-day TTL</tspan></text>
+
+ <!-- cw -->
+ <rect class="box" x="1320" y="215" width="152" height="215" rx="14"/>
+ <text class="t" x="1340" y="249">CloudWatch</text>
+ <text class="s" x="1340" y="273">LLMPlatform</text>
+ <text class="m" x="1340" y="300">Requests</text>
+ <text class="m" x="1340" y="320">LatencyMs</text>
+ <text class="m" x="1340" y="340">Tokens in/out</text>
+ <text class="m" x="1340" y="360">CostUSD</text>
+ <text class="m" x="1340" y="380">Errors</text>
+ <text class="s" x="1340" y="410">5 alarms → SNS</text>
+
+ <!-- edges -->
+ <path class="ln b" d="M170 295 L290 215"/><text class="lbl" x="178" y="318">HTTP :8000</text>
+ <path class="ln d" d="M170 105 L290 150"/><text class="lblm" x="176" y="90">key at boot</text>
+ <path class="ln b" d="M540 190 L590 190"/>
+ <path class="ln b" d="M840 160 L1010 105"/><text class="lbl" x="876" y="90">embed + Converse</text>
+ <path class="ln" d="M840 250 L1010 265"/><text class="lblm" x="880" y="242">load index</text>
+ <path class="ln" d="M540 260 C 760 330, 880 380, 1010 400"/><text class="lblm" x="690" y="392">send job</text>
+ <path class="ln" d="M1145 446 L1145 478"/>
+ <path class="ln" d="M1010 408 C 800 440, 640 450, 540 450"/><text class="lblm" x="700" y="478">receive</text>
+ <path class="ln" d="M540 490 C 700 560, 900 590, 1010 594"/><text class="lblm" x="740" y="585">status</text>
+ <path class="ln d" d="M1280 105 C 1350 105, 1380 150, 1396 215"/><text class="lblm" x="1318" y="150">metrics</text>
+ <path class="ln d" d="M1280 480 C 1380 480, 1396 450, 1396 430"/>
+</svg>
+
+<div class="foot"><span>Source: README.md, infra/cloudformation/*, app/llm_platform/*</span><span class="mono">github.com/Posiislight/bedrock-rag-platform</span></div>
+</body></html>
